@@ -385,8 +385,18 @@ def _make_provider(config: Config):
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
+    # Anthropic OAuth (Bearer token)
+    if provider_name == "anthropic_oauth" or model.startswith("anthropic-oauth/"):
+        from nanobot.providers.anthropic_oauth_provider import AnthropicOAuthProvider
+        token = p.api_key if p else ""
+        if not token:
+            console.print("[red]Error: anthropic_oauth requires a token in config.[/red]")
+            console.print("Set it in ~/.nanobot/config.json under providers.anthropicOauth.apiKey")
+            console.print("Get a token by running: claude setup-token")
+            raise typer.Exit(1)
+        provider = AnthropicOAuthProvider(token=token, default_model=model)
     # OpenAI Codex (OAuth)
-    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
+    elif provider_name == "openai_codex" or model.startswith("openai-codex/"):
         provider = OpenAICodexProvider(default_model=model)
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     elif provider_name == "custom":

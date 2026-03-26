@@ -109,6 +109,14 @@ class BaseChannel(ABC):
             return True
         return str(sender_id) in allow_list
 
+    def resolve_role(self, sender_id: str) -> str:
+        """Return 'operator' if sender_id is in the operators list, else 'client'."""
+        operators = getattr(self.config, "operators", [])
+        sid = str(sender_id)
+        # Handle "id|username" format used by Telegram channel
+        numeric_id = sid.split("|", 1)[0] if "|" in sid else sid
+        return "operator" if sid in operators or numeric_id in operators else "client"
+
     async def _handle_message(
         self,
         sender_id: str,
@@ -148,6 +156,7 @@ class BaseChannel(ABC):
             sender_id=str(sender_id),
             chat_id=str(chat_id),
             content=content,
+            role=self.resolve_role(sender_id),
             media=media or [],
             metadata=meta,
             session_key_override=session_key,

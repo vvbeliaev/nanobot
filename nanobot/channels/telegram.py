@@ -171,6 +171,7 @@ class TelegramConfig(Base):
     enabled: bool = False
     token: str = ""
     allow_from: list[str] = Field(default_factory=list)
+    operators: list[str] = Field(default_factory=list)  # sender_ids that get role="operator"
     proxy: str | None = None
     reply_to_message: bool = False
     react_emoji: str = "👀"

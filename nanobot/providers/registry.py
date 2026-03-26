@@ -35,7 +35,9 @@ class ProviderSpec:
 
     # model prefixing
     litellm_prefix: str = ""  # "dashscope" → model becomes "dashscope/{model}"
-    skip_prefixes: tuple[str, ...] = ()  # don't prefix if model already starts with these
+    skip_prefixes: tuple[
+        str, ...
+    ] = ()  # don't prefix if model already starts with these
 
     # extra env vars, e.g. (("ZHIPUAI_API_KEY", "{api_key}"),)
     env_extras: tuple[tuple[str, str], ...] = ()
@@ -49,7 +51,9 @@ class ProviderSpec:
 
     # gateway behavior
     strip_model_prefix: bool = False  # strip "provider/" before re-prefixing
-    litellm_kwargs: dict[str, Any] = field(default_factory=dict)  # extra kwargs passed to LiteLLM
+    litellm_kwargs: dict[str, Any] = field(
+        default_factory=dict
+    )  # extra kwargs passed to LiteLLM
 
     # per-model param overrides, e.g. (("kimi-k2.5", {"temperature": 1.0}),)
     model_overrides: tuple[tuple[str, dict[str, Any]], ...] = ()
@@ -82,7 +86,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         litellm_prefix="",
         is_direct=True,
     ),
-
     # === Azure OpenAI (direct API calls with API version 2024-10-21) =====
     ProviderSpec(
         name="azure_openai",
@@ -148,7 +151,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=False,
         model_overrides=(),
     ),
-
     # VolcEngine (火山引擎): OpenAI-compatible gateway, pay-per-use models
     ProviderSpec(
         name="volcengine",
@@ -166,7 +168,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=False,
         model_overrides=(),
     ),
-
     # VolcEngine Coding Plan (火山引擎 Coding Plan): same key as volcengine
     ProviderSpec(
         name="volcengine_coding_plan",
@@ -184,7 +185,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=True,
         model_overrides=(),
     ),
-
     # BytePlus: VolcEngine international, pay-per-use models
     ProviderSpec(
         name="byteplus",
@@ -202,7 +202,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=True,
         model_overrides=(),
     ),
-
     # BytePlus Coding Plan: same key as byteplus
     ProviderSpec(
         name="byteplus_coding_plan",
@@ -220,9 +219,18 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=True,
         model_overrides=(),
     ),
-
-
     # === Standard providers (matched by model-name keywords) ===============
+    # Anthropic OAuth: uses Bearer token (sk-ant-oat01-) stored in config api_key.
+    # Use model prefix "anthropic-oauth/<model>" or set provider: "anthropic_oauth".
+    ProviderSpec(
+        name="anthropic_oauth",
+        keywords=("anthropic-oauth",),
+        env_key="",  # token stored in config api_key field
+        display_name="Anthropic OAuth",
+        litellm_prefix="",
+        is_direct=True,  # bypasses LiteLLM, handled by AnthropicOAuthProvider
+        default_api_base="https://api.anthropic.com/v1",
+    ),
     # Anthropic: LiteLLM recognizes "claude-*" natively, no prefix needed.
     ProviderSpec(
         name="anthropic",
@@ -508,7 +516,8 @@ def find_by_model(model: str) -> ProviderSpec | None:
 
     for spec in std_specs:
         if any(
-            kw in model_lower or kw.replace("-", "_") in model_normalized for kw in spec.keywords
+            kw in model_lower or kw.replace("-", "_") in model_normalized
+            for kw in spec.keywords
         ):
             return spec
     return None
@@ -537,9 +546,17 @@ def find_gateway(
 
     # 2. Auto-detect by api_key prefix / api_base keyword
     for spec in PROVIDERS:
-        if spec.detect_by_key_prefix and api_key and api_key.startswith(spec.detect_by_key_prefix):
+        if (
+            spec.detect_by_key_prefix
+            and api_key
+            and api_key.startswith(spec.detect_by_key_prefix)
+        ):
             return spec
-        if spec.detect_by_base_keyword and api_base and spec.detect_by_base_keyword in api_base:
+        if (
+            spec.detect_by_base_keyword
+            and api_base
+            and spec.detect_by_base_keyword in api_base
+        ):
             return spec
 
     return None

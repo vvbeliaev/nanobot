@@ -1,0 +1,36 @@
+{
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-opus-4-6",
+      "workspace": "~/.nanobot/workspace",
+      "max_tool_iterations": 40
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "${TELEGRAM_BOT_TOKEN}",
+      "operators": ["${OPERATOR_TELEGRAM_USER_ID}"],
+      "allow_from": ["${OPERATOR_TELEGRAM_USER_ID}", "${CLIENT_TELEGRAM_USER_ID}"],
+      "react_emoji": "👀",
+      "streaming": true
+    }
+  },
+  "providers": {
+    "anthropic": {
+      "api_key": "${ANTHROPIC_API_KEY}"
+    }
+  },
+  "tools": {
+    "exec": {
+      "enable": true,
+      "timeout": 60
+    },
+    "web": {
+      "search": {
+        "provider": "brave",
+        "api_key": "${BRAVE_API_KEY}"
+      }
+    }
+  }
+}
