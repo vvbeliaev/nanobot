@@ -1,3 +1,5 @@
 {
-  "profile": "./browser-profile"
+  "cdp": "http://127.0.0.1:19900",
+  "profile": "./browser-profile",
+  "startScript": "./scripts/start-browser.sh"
 }

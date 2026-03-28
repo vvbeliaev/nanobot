@@ -78,7 +78,7 @@ class AnthropicOAuthProvider(LLMProvider):
 
         try:
             try:
-                content, tool_calls, finish_reason = await _request_anthropic(
+                content, tool_calls, finish_reason, usage = await _request_anthropic(
                     MESSAGES_URL, headers, body, verify=True,
                     on_content_delta=on_content_delta,
                 )
@@ -86,11 +86,11 @@ class AnthropicOAuthProvider(LLMProvider):
                 if "CERTIFICATE_VERIFY_FAILED" not in str(e):
                     raise
                 logger.warning("SSL verification failed; retrying with verify=False")
-                content, tool_calls, finish_reason = await _request_anthropic(
+                content, tool_calls, finish_reason, usage = await _request_anthropic(
                     MESSAGES_URL, headers, body, verify=False,
                     on_content_delta=on_content_delta,
                 )
-            return LLMResponse(content=content, tool_calls=tool_calls, finish_reason=finish_reason)
+            return LLMResponse(content=content, tool_calls=tool_calls, finish_reason=finish_reason, usage=usage)
         except Exception as e:
             return LLMResponse(content=f"Error calling Anthropic OAuth: {e}", finish_reason="error")
 
@@ -142,7 +142,7 @@ async def _request_anthropic(
     body: dict[str, Any],
     verify: bool,
     on_content_delta: Callable[[str], Awaitable[None]] | None = None,
-) -> tuple[str, list[ToolCallRequest], str]:
+) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
     async with httpx.AsyncClient(timeout=60.0, verify=verify) as client:
         async with client.stream("POST", url, headers=headers, json=body) as response:
             if response.status_code != 200:
@@ -306,16 +306,22 @@ async def _iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], 
 async def _consume_sse(
     response: httpx.Response,
     on_content_delta: Callable[[str], Awaitable[None]] | None = None,
-) -> tuple[str, list[ToolCallRequest], str]:
+) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
     content = ""
     tool_calls: list[ToolCallRequest] = []
     tool_buffers: dict[int, dict[str, Any]] = {}
     finish_reason = "stop"
+    input_tokens = 0
+    output_tokens = 0
 
     async for event in _iter_sse(response):
         event_type = event.get("type")
 
-        if event_type == "content_block_start":
+        if event_type == "message_start":
+            msg_usage = (event.get("message") or {}).get("usage") or {}
+            input_tokens = int(msg_usage.get("input_tokens") or 0)
+
+        elif event_type == "content_block_start":
             block = event.get("content_block") or {}
             idx = event.get("index", 0)
             if block.get("type") == "tool_use":
@@ -356,11 +362,14 @@ async def _consume_sse(
             stop_reason = delta.get("stop_reason")
             if stop_reason:
                 finish_reason = _map_finish_reason(stop_reason)
+            delta_usage = event.get("usage") or {}
+            if delta_usage.get("output_tokens"):
+                output_tokens = int(delta_usage["output_tokens"])
 
         elif event_type == "error":
             raise RuntimeError(f"Anthropic stream error: {event.get('error')}")
 
-    return content, tool_calls, finish_reason
+    return content, tool_calls, finish_reason, {"prompt_tokens": input_tokens, "completion_tokens": output_tokens}
 
 
 _FINISH_REASON_MAP = {

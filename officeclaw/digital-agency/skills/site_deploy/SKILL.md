@@ -55,6 +55,7 @@ agent-browser screenshot --full clients/{chat_id}/artifacts/deployed_preview_mob
 ```
 
 Проверь:
+
 - [ ] Сайт открывается (не 404, не ошибка)
 - [ ] Стили загрузились
 - [ ] Изображения отображаются
@@ -69,6 +70,7 @@ Preview: clients/{chat_id}/artifacts/deployed_preview.png
 ```
 
 Или при ошибке:
+
 ```
 DEPLOY: ❌
 Error: {сообщение}

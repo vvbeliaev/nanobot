@@ -1,0 +1,53 @@
+services:
+  nanobot-gateway:
+    container_name: nanobot-gateway
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["gateway"]
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-18790}:18790"
+    volumes:
+      - nanobot_data:/root/.nanobot
+    environment:
+      # ── LLM Providers (set at least one) ──────────────────────────────────
+      - NANOBOT_PROVIDERS__ANTHROPIC__API_KEY=${ANTHROPIC_API_KEY:-}
+      - NANOBOT_PROVIDERS__OPENAI__API_KEY=${OPENAI_API_KEY:-}
+      - NANOBOT_PROVIDERS__OPENROUTER__API_KEY=${OPENROUTER_API_KEY:-}
+      - NANOBOT_PROVIDERS__DEEPSEEK__API_KEY=${DEEPSEEK_API_KEY:-}
+      - NANOBOT_PROVIDERS__GEMINI__API_KEY=${GEMINI_API_KEY:-}
+
+      # ── Agent defaults ─────────────────────────────────────────────────────
+      - NANOBOT_AGENTS__DEFAULTS__MODEL=${NANOBOT_MODEL:-anthropic/claude-opus-4-5}
+      - NANOBOT_AGENTS__DEFAULTS__PROVIDER=${NANOBOT_PROVIDER:-auto}
+
+      # ── Channels (uncomment and fill the ones you use) ────────────────────
+      # Telegram
+      # - NANOBOT_CHANNELS__TELEGRAM__TOKEN=${TELEGRAM_TOKEN:-}
+      # Discord
+      # - NANOBOT_CHANNELS__DISCORD__TOKEN=${DISCORD_TOKEN:-}
+      # Slack
+      # - NANOBOT_CHANNELS__SLACK__BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+      # - NANOBOT_CHANNELS__SLACK__APP_TOKEN=${SLACK_APP_TOKEN:-}
+      # WeChat Work (WeCom)
+      # - NANOBOT_CHANNELS__WECOM__CORP_ID=${WECOM_CORP_ID:-}
+      # - NANOBOT_CHANNELS__WECOM__SECRET=${WECOM_SECRET:-}
+      # - NANOBOT_CHANNELS__WECOM__TOKEN=${WECOM_TOKEN:-}
+      # - NANOBOT_CHANNELS__WECOM__ENCODING_AES_KEY=${WECOM_ENCODING_AES_KEY:-}
+
+      # ── Web search ────────────────────────────────────────────────────────
+      # - NANOBOT_TOOLS__WEB__SEARCH__PROVIDER=${WEB_SEARCH_PROVIDER:-brave}
+      # - NANOBOT_TOOLS__WEB__SEARCH__API_KEY=${WEB_SEARCH_API_KEY:-}
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+volumes:
+  nanobot_data:

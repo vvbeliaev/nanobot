@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
+import nanobot.tracing as tracing
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryConsolidator
 from nanobot.agent.subagent import SubagentManager
@@ -236,6 +237,7 @@ class AgentLoop:
 
             tool_defs = self.tools.get_definitions()
 
+            _t0 = time.time()
             if on_stream:
                 response = await self.provider.chat_stream_with_retry(
                     messages=messages,
@@ -249,12 +251,24 @@ class AgentLoop:
                     tools=tool_defs,
                     model=self.model,
                 )
+            _llm_ms = int((time.time() - _t0) * 1000)
 
             usage = response.usage or {}
             self._last_usage = {
                 "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
                 "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
             }
+
+            tracing.write(
+                "llm_call",
+                session_id=f"{channel}:{chat_id}",
+                model=self.model,
+                input_tokens=self._last_usage["prompt_tokens"],
+                output_tokens=self._last_usage["completion_tokens"],
+                duration_ms=_llm_ms,
+                iteration=iteration,
+                has_tool_calls=response.has_tool_calls,
+            )
 
             if response.has_tool_calls:
                 if on_stream and on_stream_end:
@@ -284,6 +298,13 @@ class AgentLoop:
                     tools_used.append(tc.name)
                     args_str = json.dumps(tc.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tc.name, args_str[:200])
+                    tracing.write(
+                        "tool_call",
+                        session_id=f"{channel}:{chat_id}",
+                        tool=tc.name,
+                        args_preview=args_str[:200],
+                        iteration=iteration,
+                    )
 
                 # Re-bind tool context right before execution so that
                 # concurrent sessions don't clobber each other's routing.

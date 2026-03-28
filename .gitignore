@@ -26,3 +26,10 @@ uv.lock
 
 officeclaw/digital-agency/config.json
 officeclaw/digital-agency/browser-profile/
+officeclaw/digital-agency/sessions/
+officeclaw/digital-agency/memory/
+officeclaw/digital-agency/clients/
+officeclaw/digital-agency/media/
+officeclaw/digital-agency/logs/
+
+.superpowers/

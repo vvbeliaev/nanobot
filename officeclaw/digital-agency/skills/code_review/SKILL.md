@@ -2,9 +2,10 @@
 name: Code Review
 description: Review local site files (HTML/CSS/JS) for bugs, responsiveness, performance, and accessibility before deploy.
 read_when:
-  - Сайт собран и нужно проверить перед деплоем
+  - Фаза 3 (Локальная проверка) в workflow_site_build
+  - Сайт собран субагентом и нужно проверить перед деплоем
   - Нужно найти баги в HTML/CSS/JS
-  - Проверка мобильной адаптации и качества кода
+  - Проверка мобильной адаптации и качества кода перед site_deploy
 ---
 
 # Code Review — Local Site Files
