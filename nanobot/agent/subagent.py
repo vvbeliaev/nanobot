@@ -2,15 +2,14 @@
 
 import asyncio
 import json
-import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-import nanobot.tracing as tracing
-
+from nanobot.agent.hook import AgentHook, AgentHookContext
+from nanobot.agent.runner import AgentRunSpec, AgentRunner
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -20,7 +19,6 @@ from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ExecToolConfig
 from nanobot.providers.base import LLMProvider
-from nanobot.utils.helpers import build_assistant_message
 
 
 class SubagentManager:
@@ -47,6 +45,7 @@ class SubagentManager:
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self.runner = AgentRunner(provider)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
@@ -80,12 +79,6 @@ class SubagentManager:
         bg_task.add_done_callback(_cleanup)
 
         logger.info("Spawned subagent [{}]: {}", task_id, display_label)
-        tracing.write(
-            "subagent_start",
-            task_id=task_id,
-            label=display_label,
-            parent_session=f"{origin_channel}:{origin_chat_id}",
-        )
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
     async def _run_subagent(
@@ -122,71 +115,50 @@ class SubagentManager:
                 {"role": "user", "content": task},
             ]
 
-            # Run agent loop (limited iterations)
-            max_iterations = 15
-            iteration = 0
-            final_result: str | None = None
-
-            while iteration < max_iterations:
-                iteration += 1
-
-                _t0 = time.time()
-                response = await self.provider.chat_with_retry(
-                    messages=messages,
-                    tools=tools.get_definitions(),
-                    model=self.model,
-                )
-                _llm_ms = int((time.time() - _t0) * 1000)
-                _usage = response.usage or {}
-                tracing.write(
-                    "subagent_llm_call",
-                    task_id=task_id,
-                    model=self.model,
-                    input_tokens=int(_usage.get("prompt_tokens", 0) or 0),
-                    output_tokens=int(_usage.get("completion_tokens", 0) or 0),
-                    duration_ms=_llm_ms,
-                    iteration=iteration,
-                    has_tool_calls=response.has_tool_calls,
-                )
-
-                if response.has_tool_calls:
-                    tool_call_dicts = [
-                        tc.to_openai_tool_call()
-                        for tc in response.tool_calls
-                    ]
-                    messages.append(build_assistant_message(
-                        response.content or "",
-                        tool_calls=tool_call_dicts,
-                        reasoning_content=response.reasoning_content,
-                        thinking_blocks=response.thinking_blocks,
-                    ))
-
-                    # Execute tools
-                    for tool_call in response.tool_calls:
+            class _SubagentHook(AgentHook):
+                async def before_execute_tools(self, context: AgentHookContext) -> None:
+                    for tool_call in context.tool_calls:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
-                        result = await tools.execute(tool_call.name, tool_call.arguments)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.name,
-                            "content": result,
-                        })
-                else:
-                    final_result = response.content
-                    break
 
-            if final_result is None:
-                final_result = "Task completed but no final response was generated."
+            result = await self.runner.run(AgentRunSpec(
+                initial_messages=messages,
+                tools=tools,
+                model=self.model,
+                max_iterations=15,
+                hook=_SubagentHook(),
+                max_iterations_message="Task completed but no final response was generated.",
+                error_message=None,
+                fail_on_tool_error=True,
+            ))
+            if result.stop_reason == "tool_error":
+                await self._announce_result(
+                    task_id,
+                    label,
+                    task,
+                    self._format_partial_progress(result),
+                    origin,
+                    "error",
+                )
+                return
+            if result.stop_reason == "error":
+                await self._announce_result(
+                    task_id,
+                    label,
+                    task,
+                    result.error or "Error: subagent execution failed.",
+                    origin,
+                    "error",
+                )
+                return
+            final_result = result.final_content or "Task completed but no final response was generated."
 
             logger.info("Subagent [{}] completed successfully", task_id)
-            tracing.write("subagent_end", task_id=task_id, status="ok", iterations=iteration)
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
-            tracing.write("subagent_end", task_id=task_id, status="error", error=str(e), iterations=iteration)
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
 
     async def _announce_result(
@@ -220,6 +192,27 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
         await self.bus.publish_inbound(msg)
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
+
+    @staticmethod
+    def _format_partial_progress(result) -> str:
+        completed = [e for e in result.tool_events if e["status"] == "ok"]
+        failure = next((e for e in reversed(result.tool_events) if e["status"] == "error"), None)
+        lines: list[str] = []
+        if completed:
+            lines.append("Completed steps:")
+            for event in completed[-3:]:
+                lines.append(f"- {event['name']}: {event['detail']}")
+        if failure:
+            if lines:
+                lines.append("")
+            lines.append("Failure:")
+            lines.append(f"- {failure['name']}: {failure['detail']}")
+        if result.error and not failure:
+            if lines:
+                lines.append("")
+            lines.append("Failure:")
+            lines.append(f"- {result.error}")
+        return "\n".join(lines) or (result.error or "Error: subagent execution failed.")
     
     def _build_subagent_prompt(self) -> str:
         """Build a focused system prompt for the subagent."""
