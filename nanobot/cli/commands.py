@@ -405,7 +405,16 @@ def _make_provider(config: Config):
             raise typer.Exit(1)
 
     # --- instantiation by backend ---
-    if backend == "openai_codex":
+    if backend == "anthropic_oauth":
+        from nanobot.providers.anthropic_oauth_provider import AnthropicOAuthProvider
+        token = p.api_key if p else ""
+        if not token:
+            console.print("[red]Error: anthropic_oauth requires a token in config.[/red]")
+            console.print("Set it in ~/.nanobot/config.json under providers.anthropicOauth.apiKey")
+            console.print("Get a token by running: claude setup-token")
+            raise typer.Exit(1)
+        provider = AnthropicOAuthProvider(token=token, default_model=model)
+    elif backend == "openai_codex":
         from nanobot.providers.openai_codex_provider import OpenAICodexProvider
         provider = OpenAICodexProvider(default_model=model)
     elif backend == "azure_openai":

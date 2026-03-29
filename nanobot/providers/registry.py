@@ -177,6 +177,17 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=True,
     ),
     # === Standard providers (matched by model-name keywords) ===============
+    # Anthropic OAuth: Bearer token (sk-ant-oat01-) stored in config api_key.
+    # Use model prefix "anthropic-oauth/<model>" or set provider: "anthropic_oauth".
+    ProviderSpec(
+        name="anthropic_oauth",
+        keywords=("anthropic-oauth",),
+        env_key="",
+        display_name="Anthropic OAuth",
+        backend="anthropic_oauth",
+        is_direct=True,
+        default_api_base="https://api.anthropic.com/v1",
+    ),
     # Anthropic: native Anthropic SDK
     ProviderSpec(
         name="anthropic",

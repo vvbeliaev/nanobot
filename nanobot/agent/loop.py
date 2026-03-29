@@ -13,8 +13,9 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
+import nanobot.tracing as tracing
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.hook import AgentHook, AgentHookContext
+from nanobot.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from nanobot.agent.memory import MemoryConsolidator
 from nanobot.agent.runner import AgentRunSpec, AgentRunner
 from nanobot.agent.subagent import SubagentManager
@@ -262,7 +263,10 @@ class AgentLoop:
             tools=self.tools,
             model=self.model,
             max_iterations=self.max_iterations,
-            hook=_LoopHook(),
+            hook=CompositeHook(
+                _LoopHook(),
+                tracing.TracingHook(f"{channel}:{chat_id}", self.model),
+            ),
             error_message="Sorry, I encountered an error calling the AI model.",
             concurrent_tools=True,
         ))

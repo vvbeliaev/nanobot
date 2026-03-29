@@ -8,7 +8,8 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.agent.hook import AgentHook, AgentHookContext
+import nanobot.tracing as tracing
+from nanobot.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from nanobot.agent.runner import AgentRunSpec, AgentRunner
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -79,6 +80,12 @@ class SubagentManager:
         bg_task.add_done_callback(_cleanup)
 
         logger.info("Spawned subagent [{}]: {}", task_id, display_label)
+        tracing.write(
+            "subagent_start",
+            task_id=task_id,
+            label=display_label,
+            parent_session=f"{origin_channel}:{origin_chat_id}",
+        )
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
     async def _run_subagent(
@@ -126,7 +133,15 @@ class SubagentManager:
                 tools=tools,
                 model=self.model,
                 max_iterations=15,
-                hook=_SubagentHook(),
+                hook=CompositeHook(
+                    _SubagentHook(),
+                    tracing.TracingHook(
+                        f"task:{task_id}",
+                        self.model,
+                        llm_event="subagent_llm_call",
+                        tool_event="subagent_tool_call",
+                    ),
+                ),
                 max_iterations_message="Task completed but no final response was generated.",
                 error_message=None,
                 fail_on_tool_error=True,
@@ -154,11 +169,13 @@ class SubagentManager:
             final_result = result.final_content or "Task completed but no final response was generated."
 
             logger.info("Subagent [{}] completed successfully", task_id)
+            tracing.write("subagent_end", task_id=task_id, status="ok")
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
+            tracing.write("subagent_end", task_id=task_id, status="error", error=str(e))
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
 
     async def _announce_result(
