@@ -542,6 +542,12 @@ def gateway(
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
+    # Optional git sync hook (pull before run, LLM-authored commit after run)
+    run_hook = None
+    if config.agents.defaults.git_sync:
+        from nanobot.agent.git_sync import GitSyncHook
+        run_hook = GitSyncHook(provider, branch=config.agents.defaults.git_sync_branch)
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
@@ -559,6 +565,7 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        run_hook=run_hook,
     )
 
     # Set cron callback (needs agent)

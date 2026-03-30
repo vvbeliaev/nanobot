@@ -42,6 +42,8 @@ class AgentDefaults(Base):
     max_tool_iterations: int = 40
     reasoning_effort: str | None = None  # low / medium / high - enables LLM thinking mode
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
+    git_sync: bool = False  # auto git pull before run + LLM-authored commit after run
+    git_sync_branch: str = "main"  # branch to rebase onto during pull
 
 
 class AgentsConfig(Base):

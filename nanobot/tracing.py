@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from nanobot.agent.hook import AgentHook
 
 _trace_path: Path | None = None
 _initialized = False
@@ -59,7 +62,7 @@ def write(event: str, **fields: Any) -> None:
         pass  # tracing must never break the main flow
 
 
-class TracingHook:
+class TracingHook(AgentHook):
     """AgentHook that writes trace events when NANOBOT_TRACE=1.
 
     Designed for use with CompositeHook:
@@ -70,6 +73,8 @@ class TracingHook:
         model: model name written to llm_call records
         llm_event: event name for LLM calls (default "llm_call")
         tool_event: event name for tool calls (default "tool_call")
+        workspace: optional workspace path; when provided writes traces to
+            {workspace}/.traces/{safe_session_id}_{date}.jsonl
     """
 
     def __init__(
@@ -78,11 +83,38 @@ class TracingHook:
         model: str,
         llm_event: str = "llm_call",
         tool_event: str = "tool_call",
+        workspace: Path | None = None,
     ) -> None:
         self._session_id = session_id
         self._model = model
         self._llm_event = llm_event
         self._tool_event = tool_event
+        self._workspace = workspace
+
+    def _get_path(self) -> Path | None:
+        if self._workspace is not None:
+            safe_session_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", self._session_id)
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            traces_dir = self._workspace / ".traces"
+            traces_dir.mkdir(parents=True, exist_ok=True)
+            return traces_dir / f"{safe_session_id}_{date_str}.jsonl"
+        return _resolve_path()
+
+    def _write(self, event: str, **fields: Any) -> None:
+        """Append one JSON record to the trace file. Never raises."""
+        path = self._get_path()
+        if path is None:
+            return
+        record: dict[str, Any] = {
+            "event": event,
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            **fields,
+        }
+        try:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # tracing must never break the main flow
 
     def wants_streaming(self) -> bool:
         return False
@@ -101,7 +133,7 @@ class TracingHook:
             return
         for tc in context.tool_calls:
             args_str = json.dumps(tc.arguments, ensure_ascii=False)
-            write(
+            self._write(
                 self._tool_event,
                 session_id=self._session_id,
                 tool=tc.name,
@@ -112,7 +144,12 @@ class TracingHook:
     async def after_iteration(self, context: Any) -> None:
         if not enabled():
             return
-        write(
+        reasoning_preview: str | None = None
+        if context.response is not None:
+            rc = getattr(context.response, "reasoning_content", None)
+            if rc:
+                reasoning_preview = rc[:500]
+        self._write(
             self._llm_event,
             session_id=self._session_id,
             model=self._model,
@@ -121,7 +158,27 @@ class TracingHook:
             completion_tokens=context.usage.get("completion_tokens", 0),
             has_tool_calls=bool(context.tool_calls),
             stop_reason=context.stop_reason,
+            **({"reasoning_preview": reasoning_preview} if reasoning_preview is not None else {}),
         )
 
     def finalize_content(self, context: Any, content: Any) -> Any:
         return content
+
+    async def before_run(self, channel: str, chat_id: str, workspace: Path) -> None:
+        if not enabled():
+            return
+        self._write(
+            "run_start",
+            session_id=self._session_id,
+            channel=channel,
+            model=self._model,
+        )
+
+    async def after_run(self, channel: str, chat_id: str, workspace: Path, stop_reason: str) -> None:
+        if not enabled():
+            return
+        self._write(
+            "run_end",
+            session_id=self._session_id,
+            stop_reason=stop_reason,
+        )

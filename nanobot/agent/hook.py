@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from nanobot.providers.base import LLMResponse, ToolCallRequest
@@ -48,6 +49,12 @@ class AgentHook:
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
         return content
 
+    async def before_run(self, channel: str, chat_id: str, workspace: Path) -> None:
+        pass
+
+    async def after_run(self, channel: str, chat_id: str, workspace: Path, stop_reason: str) -> None:
+        pass
+
 
 class CompositeHook(AgentHook):
     """Delegates lifecycle calls to multiple hooks in order."""
@@ -82,3 +89,11 @@ class CompositeHook(AgentHook):
         for h in self._hooks:
             content = h.finalize_content(context, content)
         return content
+
+    async def before_run(self, channel: str, chat_id: str, workspace: Path) -> None:
+        for h in self._hooks:
+            await h.before_run(channel, chat_id, workspace)
+
+    async def after_run(self, channel: str, chat_id: str, workspace: Path, stop_reason: str) -> None:
+        for h in self._hooks:
+            await h.after_run(channel, chat_id, workspace, stop_reason)

@@ -69,6 +69,7 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
+        run_hook: AgentHook | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -102,6 +103,7 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
         )
 
+        self._run_hook: AgentHook = run_hook or AgentHook()
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
@@ -210,7 +212,8 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
+        trace_hook: tracing.TracingHook | None = None,
+    ) -> tuple[str | None, list[str], list[dict], str]:
         """Run the agent iteration loop.
 
         *on_stream*: called with each content delta during streaming.
@@ -258,15 +261,17 @@ class AgentLoop:
             def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
                 return loop_self._strip_think(content)
 
+        _hooks = [_LoopHook()]
+        if trace_hook is not None:
+            _hooks.append(trace_hook)
+        else:
+            _hooks.append(tracing.TracingHook(f"{channel}:{chat_id}", self.model))
         result = await self.runner.run(AgentRunSpec(
             initial_messages=initial_messages,
             tools=self.tools,
             model=self.model,
             max_iterations=self.max_iterations,
-            hook=CompositeHook(
-                _LoopHook(),
-                tracing.TracingHook(f"{channel}:{chat_id}", self.model),
-            ),
+            hook=CompositeHook(*_hooks),
             error_message="Sorry, I encountered an error calling the AI model.",
             concurrent_tools=True,
         ))
@@ -275,7 +280,7 @@ class AgentLoop:
             logger.warning("Max iterations ({}) reached", self.max_iterations)
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
-        return result.final_content, result.tools_used, result.messages
+        return result.final_content, result.tools_used, result.messages, result.stop_reason
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -415,10 +420,16 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(
+            _trace_hook = tracing.TracingHook(key, self.model, workspace=self.workspace)
+            await self._run_hook.before_run(channel, chat_id, self.workspace)
+            await _trace_hook.before_run(channel, chat_id, self.workspace)
+            final_content, _, all_msgs, stop_reason = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
+                trace_hook=_trace_hook,
             )
+            await _trace_hook.after_run(channel, chat_id, self.workspace, stop_reason)
+            await self._run_hook.after_run(channel, chat_id, self.workspace, stop_reason)
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
@@ -460,14 +471,20 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
+        _trace_hook = tracing.TracingHook(f"{msg.channel}:{msg.chat_id}", self.model, workspace=self.workspace)
+        await self._run_hook.before_run(msg.channel, msg.chat_id, self.workspace)
+        await _trace_hook.before_run(msg.channel, msg.chat_id, self.workspace)
+        final_content, _, all_msgs, stop_reason = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
             on_stream=on_stream,
             on_stream_end=on_stream_end,
             channel=msg.channel, chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
+            trace_hook=_trace_hook,
         )
+        await _trace_hook.after_run(msg.channel, msg.chat_id, self.workspace, stop_reason)
+        await self._run_hook.after_run(msg.channel, msg.chat_id, self.workspace, stop_reason)
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
