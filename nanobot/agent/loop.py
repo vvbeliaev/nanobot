@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
-import nanobot.tracing as tracing
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from nanobot.agent.memory import MemoryConsolidator
@@ -36,6 +35,115 @@ from nanobot.session.manager import Session, SessionManager
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
     from nanobot.cron.service import CronService
+
+
+class _LoopHook(AgentHook):
+    """Core lifecycle hook for the main agent loop.
+
+    Handles streaming delta relay, progress reporting, tool-call logging,
+    and think-tag stripping for the built-in agent path.
+    """
+
+    def __init__(
+        self,
+        agent_loop: AgentLoop,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+        on_stream: Callable[[str], Awaitable[None]] | None = None,
+        on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        *,
+        channel: str = "cli",
+        chat_id: str = "direct",
+        message_id: str | None = None,
+    ) -> None:
+        self._loop = agent_loop
+        self._on_progress = on_progress
+        self._on_stream = on_stream
+        self._on_stream_end = on_stream_end
+        self._channel = channel
+        self._chat_id = chat_id
+        self._message_id = message_id
+        self._stream_buf = ""
+
+    def wants_streaming(self) -> bool:
+        return self._on_stream is not None
+
+    async def on_stream(self, context: AgentHookContext, delta: str) -> None:
+        from nanobot.utils.helpers import strip_think
+
+        prev_clean = strip_think(self._stream_buf)
+        self._stream_buf += delta
+        new_clean = strip_think(self._stream_buf)
+        incremental = new_clean[len(prev_clean):]
+        if incremental and self._on_stream:
+            await self._on_stream(incremental)
+
+    async def on_stream_end(self, context: AgentHookContext, *, resuming: bool) -> None:
+        if self._on_stream_end:
+            await self._on_stream_end(resuming=resuming)
+        self._stream_buf = ""
+
+    async def before_execute_tools(self, context: AgentHookContext) -> None:
+        if self._on_progress:
+            if not self._on_stream:
+                thought = self._loop._strip_think(
+                    context.response.content if context.response else None
+                )
+                if thought:
+                    await self._on_progress(thought)
+            tool_hint = self._loop._strip_think(self._loop._tool_hint(context.tool_calls))
+            await self._on_progress(tool_hint, tool_hint=True)
+        for tc in context.tool_calls:
+            args_str = json.dumps(tc.arguments, ensure_ascii=False)
+            logger.info("Tool call: {}({})", tc.name, args_str[:200])
+        self._loop._set_tool_context(self._channel, self._chat_id, self._message_id)
+
+    async def before_iteration(self, context: AgentHookContext) -> None:
+        context.channel = self._channel
+        context.chat_id = self._chat_id
+
+    def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
+        return self._loop._strip_think(content)
+
+
+class _LoopHookChain(AgentHook):
+    """Run the core loop hook first, then best-effort extra hooks.
+
+    This preserves the historical failure behavior of ``_LoopHook`` while still
+    letting user-supplied hooks opt into ``CompositeHook`` isolation.
+    """
+
+    __slots__ = ("_primary", "_extras")
+
+    def __init__(self, primary: AgentHook, extra_hooks: list[AgentHook]) -> None:
+        self._primary = primary
+        self._extras = CompositeHook(extra_hooks)
+
+    def wants_streaming(self) -> bool:
+        return self._primary.wants_streaming() or self._extras.wants_streaming()
+
+    async def before_iteration(self, context: AgentHookContext) -> None:
+        await self._primary.before_iteration(context)
+        await self._extras.before_iteration(context)
+
+    async def on_stream(self, context: AgentHookContext, delta: str) -> None:
+        await self._primary.on_stream(context, delta)
+        await self._extras.on_stream(context, delta)
+
+    async def on_stream_end(self, context: AgentHookContext, *, resuming: bool) -> None:
+        await self._primary.on_stream_end(context, resuming=resuming)
+        await self._extras.on_stream_end(context, resuming=resuming)
+
+    async def before_execute_tools(self, context: AgentHookContext) -> None:
+        await self._primary.before_execute_tools(context)
+        await self._extras.before_execute_tools(context)
+
+    async def after_iteration(self, context: AgentHookContext) -> None:
+        await self._primary.after_iteration(context)
+        await self._extras.after_iteration(context)
+
+    def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
+        content = self._primary.finalize_content(context, content)
+        return self._extras.finalize_content(context, content)
 
 
 class AgentLoop:
@@ -69,7 +177,7 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
-        run_hook: AgentHook | None = None,
+        hooks: list[AgentHook] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -87,6 +195,7 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
+        self._extra_hooks: list[AgentHook] = hooks or []
 
         self.context = ContextBuilder(workspace, timezone=timezone)
         self.sessions = session_manager or SessionManager(workspace)
@@ -103,7 +212,6 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
         )
 
-        self._run_hook: AgentHook = run_hook or AgentHook()
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
@@ -212,8 +320,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
-        trace_hook: tracing.TracingHook | None = None,
-    ) -> tuple[str | None, list[str], list[dict], str]:
+    ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
         *on_stream*: called with each content delta during streaming.
@@ -221,57 +328,27 @@ class AgentLoop:
         ``resuming=True`` means tool calls follow (spinner should restart);
         ``resuming=False`` means this is the final response.
         """
-        loop_self = self
+        loop_hook = _LoopHook(
+            self,
+            on_progress=on_progress,
+            on_stream=on_stream,
+            on_stream_end=on_stream_end,
+            channel=channel,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+        hook: AgentHook = (
+            _LoopHookChain(loop_hook, self._extra_hooks)
+            if self._extra_hooks
+            else loop_hook
+        )
 
-        class _LoopHook(AgentHook):
-            def __init__(self) -> None:
-                self._stream_buf = ""
-
-            def wants_streaming(self) -> bool:
-                return on_stream is not None
-
-            async def on_stream(self, context: AgentHookContext, delta: str) -> None:
-                from nanobot.utils.helpers import strip_think
-
-                prev_clean = strip_think(self._stream_buf)
-                self._stream_buf += delta
-                new_clean = strip_think(self._stream_buf)
-                incremental = new_clean[len(prev_clean):]
-                if incremental and on_stream:
-                    await on_stream(incremental)
-
-            async def on_stream_end(self, context: AgentHookContext, *, resuming: bool) -> None:
-                if on_stream_end:
-                    await on_stream_end(resuming=resuming)
-                self._stream_buf = ""
-
-            async def before_execute_tools(self, context: AgentHookContext) -> None:
-                if on_progress:
-                    if not on_stream:
-                        thought = loop_self._strip_think(context.response.content if context.response else None)
-                        if thought:
-                            await on_progress(thought)
-                    tool_hint = loop_self._strip_think(loop_self._tool_hint(context.tool_calls))
-                    await on_progress(tool_hint, tool_hint=True)
-                for tc in context.tool_calls:
-                    args_str = json.dumps(tc.arguments, ensure_ascii=False)
-                    logger.info("Tool call: {}({})", tc.name, args_str[:200])
-                loop_self._set_tool_context(channel, chat_id, message_id)
-
-            def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
-                return loop_self._strip_think(content)
-
-        _hooks = [_LoopHook()]
-        if trace_hook is not None:
-            _hooks.append(trace_hook)
-        else:
-            _hooks.append(tracing.TracingHook(f"{channel}:{chat_id}", self.model))
         result = await self.runner.run(AgentRunSpec(
             initial_messages=initial_messages,
             tools=self.tools,
             model=self.model,
             max_iterations=self.max_iterations,
-            hook=CompositeHook(*_hooks),
+            hook=hook,
             error_message="Sorry, I encountered an error calling the AI model.",
             concurrent_tools=True,
         ))
@@ -280,7 +357,7 @@ class AgentLoop:
             logger.warning("Max iterations ({}) reached", self.max_iterations)
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
-        return result.final_content, result.tools_used, result.messages, result.stop_reason
+        return result.final_content, result.tools_used, result.messages
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -330,25 +407,25 @@ class AgentLoop:
                         return f"{stream_base_id}:{stream_segment}"
 
                     async def on_stream(delta: str) -> None:
+                        meta = dict(msg.metadata or {})
+                        meta["_stream_delta"] = True
+                        meta["_stream_id"] = _current_stream_id()
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id,
                             content=delta,
-                            metadata={
-                                "_stream_delta": True,
-                                "_stream_id": _current_stream_id(),
-                            },
+                            metadata=meta,
                         ))
 
                     async def on_stream_end(*, resuming: bool = False) -> None:
                         nonlocal stream_segment
+                        meta = dict(msg.metadata or {})
+                        meta["_stream_end"] = True
+                        meta["_resuming"] = resuming
+                        meta["_stream_id"] = _current_stream_id()
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id,
                             content="",
-                            metadata={
-                                "_stream_end": True,
-                                "_resuming": resuming,
-                                "_stream_id": _current_stream_id(),
-                            },
+                            metadata=meta,
                         ))
                         stream_segment += 1
 
@@ -420,16 +497,10 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
             )
-            _trace_hook = tracing.TracingHook(key, self.model, workspace=self.workspace)
-            await self._run_hook.before_run(channel, chat_id, self.workspace)
-            await _trace_hook.before_run(channel, chat_id, self.workspace)
-            final_content, _, all_msgs, stop_reason = await self._run_agent_loop(
+            final_content, _, all_msgs = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
-                trace_hook=_trace_hook,
             )
-            await _trace_hook.after_run(channel, chat_id, self.workspace, stop_reason)
-            await self._run_hook.after_run(channel, chat_id, self.workspace, stop_reason)
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
@@ -471,20 +542,14 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        _trace_hook = tracing.TracingHook(f"{msg.channel}:{msg.chat_id}", self.model, workspace=self.workspace)
-        await self._run_hook.before_run(msg.channel, msg.chat_id, self.workspace)
-        await _trace_hook.before_run(msg.channel, msg.chat_id, self.workspace)
-        final_content, _, all_msgs, stop_reason = await self._run_agent_loop(
+        final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
             on_stream=on_stream,
             on_stream_end=on_stream_end,
             channel=msg.channel, chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
-            trace_hook=_trace_hook,
         )
-        await _trace_hook.after_run(msg.channel, msg.chat_id, self.workspace, stop_reason)
-        await self._run_hook.after_run(msg.channel, msg.chat_id, self.workspace, stop_reason)
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."

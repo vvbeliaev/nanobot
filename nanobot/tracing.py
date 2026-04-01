@@ -9,8 +9,6 @@ Event types:
   llm_call        — one LLM request/response in the main agent loop
   tool_call       — a tool execution (name, args preview)
   subagent_start  — a sub-agent was spawned
-  subagent_llm_call — one LLM request inside a sub-agent loop
-  subagent_tool_call — a tool execution inside a sub-agent
   subagent_end    — sub-agent finished (ok or error)
 """
 from __future__ import annotations
@@ -22,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.hook import AgentHook
+from nanobot.agent.hook import AgentHook, AgentHookContext
 
 _trace_path: Path | None = None
 _initialized = False
@@ -65,44 +63,46 @@ def write(event: str, **fields: Any) -> None:
 class TracingHook(AgentHook):
     """AgentHook that writes trace events when NANOBOT_TRACE=1.
 
-    Designed for use with CompositeHook:
-        hook = CompositeHook(_LoopHook(), TracingHook(session_id, model))
+    Pass as an extra hook at AgentLoop construction time::
+
+        loop = AgentLoop(..., hooks=[TracingHook(model, workspace=workspace)])
+
+    ``session_id`` is derived dynamically from ``context.channel`` and
+    ``context.chat_id`` (injected by ``_LoopHook.before_iteration``), so a
+    single instance handles all sessions correctly.
 
     Args:
-        session_id: identifier written to every record, e.g. "telegram:12345"
         model: model name written to llm_call records
         llm_event: event name for LLM calls (default "llm_call")
         tool_event: event name for tool calls (default "tool_call")
-        workspace: optional workspace path; when provided writes traces to
-            {workspace}/.traces/{safe_session_id}_{date}.jsonl
+        workspace: optional workspace path; when provided writes per-session
+            traces to {workspace}/.traces/{session_id}_{date}.jsonl
     """
 
     def __init__(
         self,
-        session_id: str,
         model: str,
         llm_event: str = "llm_call",
         tool_event: str = "tool_call",
         workspace: Path | None = None,
     ) -> None:
-        self._session_id = session_id
         self._model = model
         self._llm_event = llm_event
         self._tool_event = tool_event
         self._workspace = workspace
 
-    def _get_path(self) -> Path | None:
+    def _get_path(self, session_id: str) -> Path | None:
         if self._workspace is not None:
-            safe_session_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", self._session_id)
+            safe_session_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", session_id)
             date_str = datetime.now().strftime("%Y-%m-%d")
             traces_dir = self._workspace / ".traces"
             traces_dir.mkdir(parents=True, exist_ok=True)
             return traces_dir / f"{safe_session_id}_{date_str}.jsonl"
         return _resolve_path()
 
-    def _write(self, event: str, **fields: Any) -> None:
+    def _write(self, event: str, session_id: str, **fields: Any) -> None:
         """Append one JSON record to the trace file. Never raises."""
-        path = self._get_path()
+        path = self._get_path(session_id)
         if path is None:
             return
         record: dict[str, Any] = {
@@ -119,31 +119,25 @@ class TracingHook(AgentHook):
     def wants_streaming(self) -> bool:
         return False
 
-    async def before_iteration(self, context: Any) -> None:
-        pass
-
-    async def on_stream(self, context: Any, delta: str) -> None:
-        pass
-
-    async def on_stream_end(self, context: Any, *, resuming: bool) -> None:
-        pass
-
-    async def before_execute_tools(self, context: Any) -> None:
+    async def before_execute_tools(self, context: AgentHookContext) -> None:
         if not enabled():
             return
+        session_id = f"{context.channel}:{context.chat_id}"
         for tc in context.tool_calls:
             args_str = json.dumps(tc.arguments, ensure_ascii=False)
             self._write(
                 self._tool_event,
-                session_id=self._session_id,
+                session_id,
+                session_id=session_id,
                 tool=tc.name,
                 args_preview=args_str[:200],
                 iteration=context.iteration,
             )
 
-    async def after_iteration(self, context: Any) -> None:
+    async def after_iteration(self, context: AgentHookContext) -> None:
         if not enabled():
             return
+        session_id = f"{context.channel}:{context.chat_id}"
         reasoning_preview: str | None = None
         if context.response is not None:
             rc = getattr(context.response, "reasoning_content", None)
@@ -151,7 +145,8 @@ class TracingHook(AgentHook):
                 reasoning_preview = rc[:500]
         self._write(
             self._llm_event,
-            session_id=self._session_id,
+            session_id,
+            session_id=session_id,
             model=self._model,
             iteration=context.iteration,
             prompt_tokens=context.usage.get("prompt_tokens", 0),
@@ -161,24 +156,5 @@ class TracingHook(AgentHook):
             **({"reasoning_preview": reasoning_preview} if reasoning_preview is not None else {}),
         )
 
-    def finalize_content(self, context: Any, content: Any) -> Any:
+    def finalize_content(self, context: AgentHookContext, content: Any) -> Any:
         return content
-
-    async def before_run(self, channel: str, chat_id: str, workspace: Path) -> None:
-        if not enabled():
-            return
-        self._write(
-            "run_start",
-            session_id=self._session_id,
-            channel=channel,
-            model=self._model,
-        )
-
-    async def after_run(self, channel: str, chat_id: str, workspace: Path, stop_reason: str) -> None:
-        if not enabled():
-            return
-        self._write(
-            "run_end",
-            session_id=self._session_id,
-            stop_reason=stop_reason,
-        )
