@@ -23,10 +23,18 @@ from nanobot.providers.base import LLMProvider
 
 
 class _SubagentHook(AgentHook):
-    """Logging-only hook for subagent execution."""
+    """Logging-only hook for subagent execution.
+
+    Sets context.channel = "subagent" and context.chat_id = task_id so that
+    TracingHook and GitSyncHook write to the correct per-subagent files.
+    """
 
     def __init__(self, task_id: str) -> None:
         self._task_id = task_id
+
+    async def before_iteration(self, context: AgentHookContext) -> None:
+        context.channel = "subagent"
+        context.chat_id = self._task_id
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         for tool_call in context.tool_calls:
@@ -50,6 +58,7 @@ class SubagentManager:
         web_proxy: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
+        extra_hooks: "list[AgentHook] | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -61,9 +70,37 @@ class SubagentManager:
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self._extra_hooks: list[AgentHook] = extra_hooks or []
         self.runner = AgentRunner(provider)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+
+    def _build_hook(self, task_id: str) -> AgentHook:
+        """Build a fresh per-run CompositeHook for a subagent.
+
+        _SubagentHook is always first — it injects channel/chat_id so
+        subsequent hooks (TracingHook, GitSyncHook) write to the right files.
+
+        GitSyncHook gets a fresh instance per run because _touched_files is
+        mutable state that must not be shared between concurrent subagents.
+        Other hooks (e.g. TracingHook) are shared as-is.
+        """
+        from nanobot.agent.git_sync import GitSyncHook
+
+        hooks: list[AgentHook] = [_SubagentHook(task_id)]
+        for hook in self._extra_hooks:
+            if isinstance(hook, GitSyncHook):
+                hooks.append(GitSyncHook(
+                    hook._provider,
+                    hook._workspace,
+                    model=hook._model,
+                    remote=hook._remote,
+                    branch=hook._branch,
+                    pull=False,
+                ))
+            else:
+                hooks.append(hook)
+        return CompositeHook(hooks)
 
     async def spawn(
         self,
@@ -138,12 +175,13 @@ class SubagentManager:
                 {"role": "user", "content": task},
             ]
 
+            hook = self._build_hook(task_id)
             result = await self.runner.run(AgentRunSpec(
                 initial_messages=messages,
                 tools=tools,
                 model=self.model,
                 max_iterations=15,
-                hook=_SubagentHook(task_id),
+                hook=hook,
                 max_iterations_message="Task completed but no final response was generated.",
                 error_message=None,
                 fail_on_tool_error=True,
