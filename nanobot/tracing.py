@@ -110,6 +110,7 @@ class TracingHook(AgentHook):
         record: dict[str, Any] = {
             "event": event,
             "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "session_id": session_id,
             **fields,
         }
         try:
@@ -130,7 +131,6 @@ class TracingHook(AgentHook):
             self._write(
                 self._tool_event,
                 session_id,
-                session_id=session_id,
                 tool=tc.name,
                 args_preview=args_str[:200],
                 iteration=context.iteration,
@@ -148,7 +148,6 @@ class TracingHook(AgentHook):
         self._write(
             self._llm_event,
             session_id,
-            session_id=session_id,
             model=self._model,
             iteration=context.iteration,
             prompt_tokens=context.usage.get("prompt_tokens", 0),
