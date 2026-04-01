@@ -636,6 +636,13 @@ def gateway(
             workspace=config.workspace_path,
             branch=config.agents.defaults.git_sync_branch,
         ))
+    if config.agents.defaults.skill_evolution:
+        from nanobot.agent.evolution_hook import EvolutionHook
+        extra_hooks.append(EvolutionHook(
+            provider,
+            workspace=config.workspace_path,
+            min_tool_calls=config.agents.defaults.skill_evolution_min_tool_calls,
+        ))
 
     # Create agent with cron service
     agent = AgentLoop(

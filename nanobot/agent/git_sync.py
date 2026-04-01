@@ -27,6 +27,11 @@ from nanobot.agent.hook import AgentHook, AgentHookContext
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
 
+# Shared across all GitSyncHook instances — prevents concurrent git index corruption.
+_GIT_LOCK = asyncio.Lock()
+
+_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+
 
 class GitSyncHook(AgentHook):
     """Lifecycle hook that wraps every agent run with git pull + commit.
@@ -58,16 +63,19 @@ class GitSyncHook(AgentHook):
         model: str | None = None,
         remote: str = "origin",
         branch: str = "main",
+        pull: bool = True,
     ) -> None:
         self._provider = provider
         self._workspace = workspace
         self._model = model or self._DEFAULT_MODEL
         self._remote = remote
         self._branch = branch
+        self._pull = pull
+        self._touched_files: set[str] = set()
 
     async def before_iteration(self, context: AgentHookContext) -> None:
         """Pull latest changes before the agent starts work (first iteration only)."""
-        if context.iteration != 1:
+        if not self._pull or context.iteration != 0:
             return
         try:
             rc, stderr = await _git(
@@ -79,35 +87,32 @@ class GitSyncHook(AgentHook):
         except Exception as exc:
             logger.warning("GitSyncHook.before_iteration pull: {}", exc)
 
+    async def before_execute_tools(self, context: AgentHookContext) -> None:
+        """Track files written by this session."""
+        for tc in context.tool_calls:
+            if tc.name in _WRITE_TOOLS and "path" in tc.arguments:
+                self._touched_files.add(tc.arguments["path"])
+
     async def after_iteration(self, context: AgentHookContext) -> None:
-        """Commit all workspace changes after the agent finishes (final iteration only)."""
+        """Commit only session-touched files after the agent finishes (final iteration only)."""
         if context.stop_reason is None:
             return
+        files = list(self._touched_files)
+        self._touched_files.clear()
+        if not files:
+            return
         try:
-            diff_summary = await _diff_summary(self._workspace, self._MAX_DIFF_CHARS)
             trigger = "cron" if context.channel == "cron" else "channel"
-
-            if not diff_summary.strip():
-                await _git(
-                    [
-                        "git",
-                        "commit",
-                        "--allow-empty",
-                        "-m",
-                        f"[agent/{trigger}] no-op: no file changes",
-                    ],
-                    self._workspace,
-                )
-                return
-
+            diff_summary = await _diff_summary(self._workspace, self._MAX_DIFF_CHARS)
             trace_context = _read_trace_tools(
                 self._workspace, context.channel, context.chat_id, self._MAX_TRACE_TOOL_CALLS
             )
             commit_msg = await self._generate_commit_msg(
                 trigger, context.stop_reason, diff_summary, trace_context
             )
-            await _git(["git", "add", "-A"], self._workspace)
-            rc, stderr = await _git(["git", "commit", "-m", commit_msg], self._workspace)
+            async with _GIT_LOCK:
+                await _git(["git", "add"] + files, self._workspace)
+                rc, stderr = await _git(["git", "commit", "-m", commit_msg], self._workspace)
             if rc != 0:
                 logger.warning("git commit failed (rc={}): {}", rc, stderr)
         except Exception as exc:
