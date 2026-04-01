@@ -93,11 +93,13 @@ class TracingHook(AgentHook):
 
     def _get_path(self, session_id: str) -> Path | None:
         if self._workspace is not None:
+            # When workspace is set the hook was explicitly enabled — always write.
             safe_session_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", session_id)
             date_str = datetime.now().strftime("%Y-%m-%d")
             traces_dir = self._workspace / ".traces"
             traces_dir.mkdir(parents=True, exist_ok=True)
             return traces_dir / f"{safe_session_id}_{date_str}.jsonl"
+        # Legacy: workspace-less mode still requires NANOBOT_TRACE=1.
         return _resolve_path()
 
     def _write(self, event: str, session_id: str, **fields: Any) -> None:
@@ -120,7 +122,7 @@ class TracingHook(AgentHook):
         return False
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
-        if not enabled():
+        if self._workspace is None and not enabled():
             return
         session_id = f"{context.channel}:{context.chat_id}"
         for tc in context.tool_calls:
@@ -135,7 +137,7 @@ class TracingHook(AgentHook):
             )
 
     async def after_iteration(self, context: AgentHookContext) -> None:
-        if not enabled():
+        if self._workspace is None and not enabled():
             return
         session_id = f"{context.channel}:{context.chat_id}"
         reasoning_preview: str | None = None

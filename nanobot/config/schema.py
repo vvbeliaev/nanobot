@@ -46,6 +46,7 @@ class AgentDefaults(Base):
     git_sync_branch: str = "main"  # branch to rebase onto during pull
     skill_evolution: bool = False  # background skill crystallisation after qualifying runs
     skill_evolution_min_tool_calls: int = 8  # minimum tool calls to trigger evolver
+    tracing: bool = False  # write per-session JSONL traces to {workspace}/.traces/
 
 
 class AgentsConfig(Base):

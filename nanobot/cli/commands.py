@@ -643,6 +643,12 @@ def gateway(
             workspace=config.workspace_path,
             min_tool_calls=config.agents.defaults.skill_evolution_min_tool_calls,
         ))
+    if config.agents.defaults.tracing:
+        from nanobot.tracing import TracingHook
+        extra_hooks.append(TracingHook(
+            model=config.agents.defaults.model,
+            workspace=config.workspace_path,
+        ))
 
     # Create agent with cron service
     agent = AgentLoop(
