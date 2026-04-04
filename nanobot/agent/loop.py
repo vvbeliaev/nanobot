@@ -206,7 +206,9 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = (
-            max_iterations if max_iterations is not None else defaults.max_tool_iterations
+            max_iterations
+            if max_iterations is not None
+            else defaults.max_tool_iterations
         )
         self.context_window_tokens = (
             context_window_tokens
@@ -409,23 +411,25 @@ class AgentLoop:
                 return
             self._set_runtime_checkpoint(session, payload)
 
-        result = await self.runner.run(AgentRunSpec(
-            initial_messages=initial_messages,
-            tools=self.tools,
-            model=self.model,
-            max_iterations=self.max_iterations,
-            max_tool_result_chars=self.max_tool_result_chars,
-            hook=hook,
-            error_message="Sorry, I encountered an error calling the AI model.",
-            concurrent_tools=True,
-            workspace=self.workspace,
-            session_key=session.key if session else None,
-            context_window_tokens=self.context_window_tokens,
-            context_block_limit=self.context_block_limit,
-            provider_retry_mode=self.provider_retry_mode,
-            progress_callback=on_progress,
-            checkpoint_callback=_checkpoint,
-        ))
+        result = await self.runner.run(
+            AgentRunSpec(
+                initial_messages=initial_messages,
+                tools=self.tools,
+                model=self.model,
+                max_iterations=self.max_iterations,
+                max_tool_result_chars=self.max_tool_result_chars,
+                hook=hook,
+                error_message="Sorry, I encountered an error calling the AI model.",
+                concurrent_tools=True,
+                workspace=self.workspace,
+                session_key=session.key if session else None,
+                context_window_tokens=self.context_window_tokens,
+                context_block_limit=self.context_block_limit,
+                provider_retry_mode=self.provider_retry_mode,
+                progress_callback=on_progress,
+                checkpoint_callback=_checkpoint,
+            )
+        )
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":
             logger.warning("Max iterations ({}) reached", self.max_iterations)
@@ -595,7 +599,8 @@ class AgentLoop:
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=0)
-            current_role = "assistant" if msg.sender_id == "subagent" else "user"
+            # current_role = "assistant" if msg.sender_id == "subagent" else "user"
+            current_role = "user"
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content,
@@ -604,7 +609,10 @@ class AgentLoop:
                 current_role=current_role,
             )
             final_content, _, all_msgs = await self._run_agent_loop(
-                messages, session=session, channel=channel, chat_id=chat_id,
+                messages,
+                session=session,
+                channel=channel,
+                chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
             )
             self._save_turn(session, all_msgs, 1 + len(history))
@@ -670,7 +678,8 @@ class AgentLoop:
             on_stream=on_stream,
             on_stream_end=on_stream_end,
             session=session,
-            channel=msg.channel, chat_id=msg.chat_id,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
         )
 
@@ -728,10 +737,9 @@ class AgentLoop:
             ):
                 continue
 
-            if (
-                block.get("type") == "image_url"
-                and block.get("image_url", {}).get("url", "").startswith("data:image/")
-            ):
+            if block.get("type") == "image_url" and block.get("image_url", {}).get(
+                "url", ""
+            ).startswith("data:image/"):
                 path = (block.get("_meta") or {}).get("path", "")
                 filtered.append({"type": "text", "text": image_placeholder_text(path)})
                 continue
@@ -757,8 +765,13 @@ class AgentLoop:
             if role == "assistant" and not content and not entry.get("tool_calls"):
                 continue  # skip empty assistant messages — they poison session context
             if role == "tool":
-                if isinstance(content, str) and len(content) > self.max_tool_result_chars:
-                    entry["content"] = truncate_text(content, self.max_tool_result_chars)
+                if (
+                    isinstance(content, str)
+                    and len(content) > self.max_tool_result_chars
+                ):
+                    entry["content"] = truncate_text(
+                        content, self.max_tool_result_chars
+                    )
                 elif isinstance(content, list):
                     filtered = self._sanitize_persisted_blocks(
                         content, truncate_text=True
@@ -787,7 +800,9 @@ class AgentLoop:
             session.messages.append(entry)
         session.updated_at = datetime.now()
 
-    def _set_runtime_checkpoint(self, session: Session, payload: dict[str, Any]) -> None:
+    def _set_runtime_checkpoint(
+        self, session: Session, payload: dict[str, Any]
+    ) -> None:
         """Persist the latest in-flight turn state into session metadata."""
         session.metadata[self._RUNTIME_CHECKPOINT_KEY] = payload
         self.sessions.save(session)
@@ -835,13 +850,15 @@ class AgentLoop:
                 continue
             tool_id = tool_call.get("id")
             name = ((tool_call.get("function") or {}).get("name")) or "tool"
-            restored_messages.append({
-                "role": "tool",
-                "tool_call_id": tool_id,
-                "name": name,
-                "content": "Error: Task interrupted before this tool finished.",
-                "timestamp": datetime.now().isoformat(),
-            })
+            restored_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_id,
+                    "name": name,
+                    "content": "Error: Task interrupted before this tool finished.",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
 
         overlap = 0
         max_overlap = min(len(session.messages), len(restored_messages))
@@ -849,7 +866,8 @@ class AgentLoop:
             existing = session.messages[-size:]
             restored = restored_messages[:size]
             if all(
-                self._checkpoint_message_key(left) == self._checkpoint_message_key(right)
+                self._checkpoint_message_key(left)
+                == self._checkpoint_message_key(right)
                 for left, right in zip(existing, restored)
             ):
                 overlap = size
