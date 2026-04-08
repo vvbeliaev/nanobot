@@ -693,6 +693,12 @@ def gateway(
             model=config.agents.defaults.model,
             workspace=config.workspace_path,
         ))
+    if config.agents.defaults.runs_log:
+        from nanobot.agent.runs_log import RunsLogHook
+        extra_hooks.append(RunsLogHook(
+            provider,
+            workspace=config.workspace_path,
+        ))
 
     # Create agent with cron service
     agent = AgentLoop(

@@ -88,13 +88,16 @@ class SubagentManager:
         """Build a fresh per-run CompositeHook for a subagent.
 
         _SubagentHook is always first — it injects channel/chat_id so
-        subsequent hooks (TracingHook, GitSyncHook) write to the right files.
+        subsequent hooks (TracingHook, GitSyncHook, RunsLogHook) write to the
+        right files.
 
-        GitSyncHook gets a fresh instance per run because _touched_files is
-        mutable state that must not be shared between concurrent subagents.
+        GitSyncHook and RunsLogHook each get a fresh instance per run because
+        they hold mutable per-run state (touched files, tool counts, start
+        timestamp) that must not be shared between concurrent subagents.
         Other hooks (e.g. TracingHook) are shared as-is.
         """
         from nanobot.agent.git_sync import GitSyncHook
+        from nanobot.agent.runs_log import RunsLogHook
 
         hooks: list[AgentHook] = [_SubagentHook(task_id)]
         for hook in self._extra_hooks:
@@ -107,6 +110,14 @@ class SubagentManager:
                         remote=hook._remote,
                         branch=hook._branch,
                         pull=False,
+                    )
+                )
+            elif isinstance(hook, RunsLogHook):
+                hooks.append(
+                    RunsLogHook(
+                        hook._provider,
+                        hook._workspace,
+                        model=hook._model,
                     )
                 )
             else:

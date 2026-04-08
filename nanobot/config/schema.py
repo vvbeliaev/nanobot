@@ -87,6 +87,7 @@ class AgentDefaults(Base):
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
     git_sync: bool = False  # auto git pull before run + LLM-authored commit after run
     git_sync_branch: str = "main"  # branch to rebase onto during pull
+    runs_log: bool = False  # append per-run LLM summaries to {workspace}/.runs/*.jsonl
     skill_evolution: bool = (
         False  # background skill crystallisation after qualifying runs
     )
