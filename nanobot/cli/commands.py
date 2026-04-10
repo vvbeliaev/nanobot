@@ -870,6 +870,14 @@ def gateway(
     console.print(f"[green]✓[/green] Dream: {dream_cfg.describe_schedule()}")
 
     async def run():
+        from aiohttp import web as aio_web
+        from nanobot.api.server import create_app
+
+        api_app = create_app(agent, model_name=config.agents.defaults.model)
+        runner = aio_web.AppRunner(api_app)
+        await runner.setup()
+        await aio_web.TCPSite(runner, host=config.gateway.host, port=port).start()
+
         try:
             await cron.start()
             await heartbeat.start()
@@ -890,6 +898,7 @@ def gateway(
             cron.stop()
             agent.stop()
             await channels.stop_all()
+            await runner.cleanup()
 
     asyncio.run(run())
 
